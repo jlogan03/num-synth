@@ -1,14 +1,8 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Synthetic floating-point representations using narrow integer digits.
+//!
+//! [`S64I8`] provides exact binary64 expansion and correctly rounded collapse.
+//! Arithmetic is deferred until its rounding contract is established.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+mod s64i8;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use s64i8::{Class, InvalidFiniteParts, S64I8};
