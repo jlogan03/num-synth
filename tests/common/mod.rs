@@ -1,131 +1,82 @@
-#![allow(dead_code)]
-use num_bigint::{BigInt, BigUint, Sign};
-use num_synth::S64U8;
-pub const INF: u64 = 0x7ff0_0000_0000_0000;
+use num_bigint::{BigInt, Sign};
+use num_synth::Df32;
+use num_traits::{Signed, ToPrimitive, Zero};
 
-pub fn finite(negative: bool, exponent: i16, digits: [u8; 32]) -> S64U8 {
-    S64U8::from_finite_parts(negative, exponent, digits).unwrap()
-}
-pub fn power(exponent: i16) -> S64U8 {
-    let mut digits = [0; 32];
-    digits[31] = 128;
-    finite(false, exponent, digits)
-}
-pub fn dyadic(value: S64U8) -> (BigInt, i32) {
-    let (negative, exponent, digits) = value.finite_parts().unwrap();
-    (
-        BigInt::from_bytes_le(if negative { Sign::Minus } else { Sign::Plus }, &digits),
-        i32::from(exponent) - 255,
-    )
-}
-pub fn assert_same(a: S64U8, b: S64U8) {
-    assert_eq!(a.class(), b.class());
-    assert_eq!(a.is_sign_negative(), b.is_sign_negative());
-    assert_eq!(a.finite_parts(), b.finite_parts());
-}
-pub fn sum((a, ap): (BigInt, i32), (b, bp): (BigInt, i32)) -> (BigInt, i32) {
-    let power = ap.min(bp);
-    (
-        (a << (ap - power) as usize) + (b << (bp - power) as usize),
-        power,
-    )
+// All f32 values lie on this exact integer lattice, measured in 2^-149.
+pub fn scalar(x: f32) -> BigInt {
+    assert!(x.is_finite());
+    let bits = x.to_bits();
+    let exponent = (bits >> 23) & 255;
+    let fraction = bits & 0x7fffff;
+    let n = if exponent == 0 {
+        BigInt::from(fraction)
+    } else {
+        BigInt::from(fraction | 0x800000) << (exponent - 1) as usize
+    };
+    if x.is_sign_negative() { -n } else { n }
 }
 
-pub fn product((a, ap): (BigInt, i32), (b, bp): (BigInt, i32)) -> (BigInt, i32) {
-    (a * b, ap + bp)
+pub fn value(x: Df32) -> BigInt {
+    let (hi, lo) = x.to_parts();
+    scalar(hi) + scalar(lo)
 }
 
-// Independent 256-bit oracle: arbitrary-precision quotient/remainder and an
-// exact distance comparison, rather than the implementation's limb guard bits.
-pub fn synthetic_reference(n: &BigInt, power: i32) -> S64U8 {
-    let negative = n.sign() == Sign::Minus;
-    let m = n.magnitude();
-    if m == &BigUint::from(0_u8) {
-        return S64U8::from_f64(0.0);
+// Independent integer nearest-even rounding, including subnormal/normal
+// transitions and overflow. Input and output both use the 2^-149 lattice.
+pub fn round32(n: &BigInt) -> f32 {
+    let sign = if n.sign() == Sign::Minus { 1 << 31 } else { 0 };
+    let a = n.magnitude();
+    if a.bits() <= 23 {
+        return f32::from_bits(sign | a.to_u32().unwrap());
     }
-    let mut exponent = power + m.bits() as i32 - 1;
-    if exponent < i32::from(i16::MIN) {
-        let unit = power.min(i32::from(i16::MIN) - 1);
-        let exact = m << (power - unit) as usize;
-        let half_min = BigUint::from(1_u8) << (i32::from(i16::MIN) - 1 - unit) as usize;
-        return if exact > half_min {
-            finite(negative, i16::MIN, {
-                let mut d = [0; 32];
-                d[31] = 128;
-                d
-            })
-        } else {
-            S64U8::from_bits(u64::from(negative) << 63)
-        };
+    let shift = a.bits().saturating_sub(24) as usize;
+    let mut q = a >> shift;
+    if shift > 0 {
+        let remainder = a - (&q << shift);
+        let half = num_bigint::BigUint::from(1u8) << (shift - 1);
+        if remainder > half || (remainder == half && q.bit(0)) {
+            q += 1u8;
+        }
     }
-    if exponent > i32::from(i16::MAX) {
-        return S64U8::from_bits((u64::from(negative) << 63) | INF);
-    }
-    let grid = exponent - 255;
-    let numerator = m << (power - grid).max(0) as usize;
-    let denominator = BigUint::from(1_u8) << (grid - power).max(0) as usize;
-    let mut q = &numerator / &denominator;
-    let remainder = numerator % &denominator;
-    let twice = &remainder + &remainder;
-    if twice > denominator || (twice == denominator && q.bit(0)) {
-        q += 1_u8;
-    }
-    if q == (BigUint::from(1_u8) << 256) {
-        q /= 2_u8;
+    let mut exponent = shift + 1;
+    if q.bits() > 24 {
+        q >>= 1;
         exponent += 1;
     }
-    if exponent > i32::from(i16::MAX) {
-        S64U8::from_bits((u64::from(negative) << 63) | INF)
+    if exponent >= 255 {
+        f32::from_bits(sign | 0x7f800000)
     } else {
-        let mut digits = [0; 32];
-        let bytes = q.to_bytes_le();
-        digits[..bytes.len()].copy_from_slice(&bytes);
-        finite(negative, exponent as i16, digits)
+        f32::from_bits(sign | (exponent as u32) << 23 | (q.to_u32().unwrap() & 0x7fffff))
     }
 }
 
-// IEEE conversion oracle: search adjacent encodings on an exact integer lattice.
-pub fn format_reference(n: &BigInt, power: i32, fraction_bits: u32, bias: i32) -> u64 {
-    let infinity = ((2 * bias + 1) as u64) << fraction_bits;
-    let sign_bit = if fraction_bits == 52 { 63 } else { 31 };
-    let min_power = 1 - bias - fraction_bits as i32;
-    let sign = u64::from(n.sign() == Sign::Minus) << sign_bit;
-    let unit = power.min(min_power);
-    let exact = n.magnitude() << (power - unit) as usize;
-    let point = |bits: u64| {
-        if bits == infinity {
-            BigUint::from(1_u8) << (bias + 1 - unit) as usize
-        } else {
-            let field = (bits >> fraction_bits) as i32;
-            let fraction = bits & ((1 << fraction_bits) - 1);
-            let (m, p) = if field == 0 {
-                (fraction, min_power)
-            } else {
-                (
-                    fraction | (1 << fraction_bits),
-                    field - bias - fraction_bits as i32,
-                )
-            };
-            BigUint::from(m) << (p - unit) as usize
+pub fn normalized(x: Df32) {
+    let (hi, lo) = x.to_parts();
+    if !hi.is_finite() {
+        assert_eq!(lo.to_bits(), 0);
+        if hi.is_nan() {
+            assert_eq!(hi.to_bits(), 0x7fc00000);
         }
-    };
-    if exact >= point(infinity) {
-        return sign | infinity;
+        return;
     }
-    let (mut lo, mut hi) = (0, infinity);
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        if point(mid) <= exact {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
+    assert!(lo.is_finite());
+    if lo == 0.0 {
+        assert_eq!(lo.to_bits(), 0);
     }
-    let down = &exact - point(lo);
-    let up = point(hi) - exact;
-    sign | if down < up || (down == up && lo & 1 == 0) {
-        lo
+    let n = value(x);
+    if n.is_zero() {
+        assert_eq!(hi, 0.0);
     } else {
-        hi
+        assert_eq!(hi.to_bits(), round32(&n).to_bits(), "{x:?}");
     }
+}
+
+pub fn bounded_error(got: &BigInt, expected: &BigInt, scale: &BigInt, bits: usize) {
+    let error = (got - expected).abs();
+    assert!(
+        (&error << bits) <= scale.abs(),
+        "error={} scale={} bits={bits}",
+        error,
+        scale
+    );
 }

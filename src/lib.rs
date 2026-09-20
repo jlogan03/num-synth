@@ -1,13 +1,12 @@
-//! Fixed-width synthetic floating point using small-width integer arithmetic.
+//! Synthetic floating-point arithmetic for embedded and GPU workloads.
 //!
-//! [`S64U8`] has 256-bit working precision in 32 unsigned bytes. Arithmetic
-//! stays in this format; explicit conversions round to binary64 or binary32.
+//! [`Df32`] represents one number as a leading `f32` and a small residual.
+//! Arithmetic retains that residual; conversion back to a scalar is explicit.
+//! See `design/Df32.md` for algorithms, accuracy limits, and backend requirements.
 //!
-//! The library uses only `core`: it does not link `std` or `alloc` and requires
-//! no global allocator. All runtime storage is fixed-size. Host-side tests use
-//! separate development dependencies for arbitrary-precision reference checks.
+//! The library is unconditionally `no_std` and does not use `alloc`.
 
 #![no_std]
 
-mod s64u8;
-pub use s64u8::{Class, InvalidFiniteParts, S64U8};
+mod df32;
+pub use df32::Df32;

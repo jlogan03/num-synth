@@ -4,7 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
+libm = "0.2.16"
 
 [dev-dependencies]
 num-bigint = "0.4"
 proptest = "1"
+
+[[bench]]
+name = "arithmetic"
+harness = false

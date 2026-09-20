@@ -1,37 +1,46 @@
 # num-synth
 
-Fixed-width synthetic floating point for devices without native f64 arithmetic.
+Synthetic floating-point arithmetic for embedded and GPU workloads.
 
-`S64U8` keeps a 256-bit significand in `[u8; 32]`, with an `i16` exponent,
-sign, and classification. Arithmetic uses byte digits, `u16`/`u32` accumulators,
-and fixed scratch arrays. The library is unconditionally `no_std` and uses only
-`core`, with no production dependencies, `alloc` dependency, or global allocator
-requirement. This is the runtime contract for embedded and GPU builds;
-host-side tests use separate development dependencies.
+`Df32` represents one number as the sum of two `f32` values:
+a leading value and a small residual. Its purpose is to retain fine detail
+during computation, such as micron-scale relative positions inside a
+10-meter structure, while using native single-precision arithmetic.
+
+The design prioritizes fixed storage, predictable operation sequences, and
+consistent numerical behavior. It targets roughly doubled single-precision
+accuracy in ordinary working ranges, without promising binary64 precision
+or range everywhere. The runtime must remain `no_std` and allocation-free.
+
+See [the Df32 design](design/Df32.md) for the representation, implemented
+arithmetic, precision limits, and validation plan.
 
 ```rust
-use num_synth::S64U8;
+use num_synth::Df32;
 
-let a = S64U8::from_f64(1.25);
-let b = S64U8::from_f32(0.5);
-let working = (a + b) * a;
-let result = a.mul_add(b, working);
-let output64 = result.to_f64();
-let output32 = result.to_f32();
+let origin = Df32::from_f32(10.0);
+let offset = Df32::from_f32(1e-6);
+let position = origin + offset;
+assert_eq!(position - origin, offset);
+
+let scale = Df32::from_f64(3.25);
+let transformed = position.mul_add(scale, Df32::from_f32(2.0));
+let (hi, lo) = transformed.to_parts(); // Keep both components for transport.
+let output = transformed.to_f64();    // Explicit scalar conversion.
 ```
 
-Operators round to the working format's 256-bit capacity. Conversion is a
-separate action and rounds the stored value directly to f64 or f32. There is
-no intermediate 68-bit stage or arithmetic `_f64` API. The 32-byte significand
-plus metadata occupies 36 bytes; multiplication and FMA use fixed 66-byte
-scratch integers to hold products and alignment information.
+Implemented: normalization, scalar conversions, comparisons, addition,
+subtraction, multiplication, division, and combined multiply-add. `mul_add`
+retains product residuals through cancellation; it does not promise correctly
+rounded evaluation of every exact pair-valued expression.
 
-Implemented: exact f64/f32 expansion, nearest-even conversion, addition,
-subtraction, multiplication, fused multiply-add, negation, and comparisons.
-Division, square root, and GPU kernels remain future work. Throughput and
-register pressure have not yet been benchmarked.
+The runtime uses `num-traits` and `libm`, with no `std` or `alloc` requirement.
+`Zero`, `One`, `MulAdd`, and `MulAddAssign` are implemented. Scalar FMA uses
+libm's hardware paths or software fallback; the latter can be expensive on
+devices without f64. GPU primitive integration and execution testing remain
+future work. No GPU throughput claim follows from no-std compatibility.
 
-See [the S64U8 design](design/S64U8.md) for range/precision proofs, accumulator
-bounds, rounding, and special-value behavior. This replaces the S64I8 prototype.
-Run `cargo check --lib` to check the runtime library and `cargo test` for
-arbitrary-precision reference checks.
+Run `cargo test` for exact-reference properties and directed tests, and
+`cargo bench --bench arithmetic` for CPU measurements. Embedded and WebAssembly
+compilation can be checked with `cargo check --lib --target thumbv7em-none-eabihf`
+and `cargo check --lib --target wasm32-unknown-unknown`.
