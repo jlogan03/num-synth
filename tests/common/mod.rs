@@ -54,9 +54,6 @@ pub fn normalized(x: Df32) {
     let (hi, lo) = x.to_parts();
     if !hi.is_finite() {
         assert_eq!(lo.to_bits(), 0);
-        if hi.is_nan() {
-            assert_eq!(hi.to_bits(), 0x7fc00000);
-        }
         return;
     }
     assert!(lo.is_finite());

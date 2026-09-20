@@ -22,12 +22,12 @@ pub struct Df32 {
     lo: f32,
 }
 
-// Explicitly fused, including when hardware FMA is unavailable. num-traits
-// also uses libm. Call it directly so Cargo feature unification with a consumer's
-// num-traits/std cannot change our primitive backend.
+// Zero wraps to u32::MAX after subtracting one. Nonzero finite magnitudes
+// remain below the threshold; infinities and NaNs are at or above it.
 #[inline]
-fn fma(a: f32, b: f32, c: f32) -> f32 {
-    libm::fmaf(a, b, c)
+const fn is_nonfinite_or_zero(value: f32) -> bool {
+    let magnitude = value.to_bits() & 0x7fff_ffff;
+    magnitude.wrapping_sub(1) >= 0x7f7f_ffff
 }
 
 // No magnitude precondition. Keep each operation individually rounded.
@@ -42,7 +42,7 @@ const fn two_sum(a: f32, b: f32) -> (f32, f32) {
 #[inline]
 fn two_prod(a: f32, b: f32) -> (f32, f32) {
     let p = a * b;
-    (p, fma(a, b, -p))
+    (p, libm::fmaf(a, b, -p))
 }
 
 // Fixed two-component compensated sum, not a normalized public value.
@@ -69,20 +69,16 @@ impl Df32 {
     pub const NEG_ZERO: Self = Self::from_f32(-0.0);
     pub const ONE: Self = Self::from_f32(1.0);
     pub const NAN: Self = Self {
-        hi: f32::from_bits(0x7fc0_0000),
+        hi: f32::NAN,
         lo: 0.0,
     };
     pub const INFINITY: Self = Self::from_f32(f32::INFINITY);
     pub const NEG_INFINITY: Self = Self::from_f32(f32::NEG_INFINITY);
 
-    /// Expands a scalar exactly, except that NaNs are canonicalized.
+    /// Stores the scalar directly, with a zero residual.
     #[inline]
     pub const fn from_f32(value: f32) -> Self {
-        if value.is_nan() {
-            Self::NAN
-        } else {
-            Self { hi: value, lo: 0.0 }
-        }
+        Self { hi: value, lo: 0.0 }
     }
 
     /// Splits a binary64 input at the boundary. Not an exact f64 round-trip.
@@ -90,17 +86,21 @@ impl Df32 {
     #[inline]
     pub const fn from_f64(value: f64) -> Self {
         let hi = value as f32;
-        if !hi.is_finite() || value == 0.0 {
+        // Avoid inf-inf in the residual and preserve signed zero, including
+        // finite inputs that underflow to f32 zero. Their residual also rounds
+        // to zero, so splitting them cannot recover another component.
+        if is_nonfinite_or_zero(hi) {
             return Self::from_f32(hi);
         }
         Self::from_parts(hi, (value - hi as f64) as f32)
     }
 
     /// Normalizes the sum of arbitrary components, without a magnitude
-    /// precondition. Opposite infinities and NaNs yield canonical NaN.
+    /// precondition. Opposite infinities and NaNs yield NaN; its bits are unspecified.
     #[inline]
     pub const fn from_parts(hi: f32, lo: f32) -> Self {
         let sum = hi + lo;
+        // TwoSum's error recovery would turn a valid infinity into NaN.
         if !sum.is_finite() {
             return Self::from_f32(sum);
         }
@@ -167,24 +167,20 @@ impl Df32 {
     /// terminal even when the addend could have canceled it.
     #[inline]
     pub fn mul_add(self, b: Self, c: Self) -> Self {
-        if !self.is_finite() || !b.is_finite() || !c.is_finite() {
-            return Self::from_f32(fma(self.hi, b.hi, c.hi));
-        }
         let p = self.hi * b.hi;
         let s = p + c.hi;
+        // This one result check also detects every nonfinite input. An
+        // infinite addend needs scalar FMA semantics: a finite-input product
+        // that overflowed to opposite infinity must not override the addend.
         if !s.is_finite() {
-            return Self::from_f32(s);
-        }
-        if self.is_zero() || b.is_zero() {
-            // Preserve the addend's low part and scalar FMA signed-zero rules.
-            return if c.is_zero() {
-                Self::from_f32(fma(self.hi, b.hi, c.hi))
+            return if !c.is_finite() {
+                Self::from_f32(libm::fmaf(self.hi, b.hi, c.hi))
             } else {
-                c
+                Self::from_f32(s)
             };
         }
         let (_, t) = two_sum(p, c.hi);
-        let e = fma(self.hi, b.hi, -p);
+        let e = libm::fmaf(self.hi, b.hi, -p);
         let (x, xe) = two_prod(self.hi, b.lo);
         let (y, ye) = two_prod(self.lo, b.hi);
         let (z, ze) = two_prod(self.lo, b.lo);
@@ -200,6 +196,7 @@ impl Df32 {
             .add(z)
             .add(ze);
         let (hi, lo) = two_sum(s, r.hi);
+        // A residual carry can overflow even when the leading sum was finite.
         if !hi.is_finite() {
             return Self::from_f32(hi);
         }
@@ -207,7 +204,7 @@ impl Df32 {
         if result.is_zero() && c.is_zero() {
             // A nonzero product can underflow to signed zero.
             Self::from_f32(f32::from_bits(
-                fma(self.hi, b.hi, c.hi).to_bits() & (1 << 31),
+                libm::fmaf(self.hi, b.hi, c.hi).to_bits() & (1 << 31),
             ))
         } else {
             result
@@ -221,6 +218,7 @@ impl Add for Df32 {
     #[inline]
     fn add(self, rhs: Self) -> Self {
         let sum = self.hi + rhs.hi;
+        // Preserve infinities/overflow before TwoSum computes inf-inf.
         if !sum.is_finite() {
             return Self::from_f32(sum);
         }
@@ -230,6 +228,7 @@ impl Add for Df32 {
         let (_, e) = two_sum(self.hi, rhs.hi);
         let (t, f) = two_sum(self.lo, rhs.lo);
         let (hi, lo) = two_sum(sum, e + t);
+        // Required for overflow caused by carrying the residual into `hi`.
         if !hi.is_finite() {
             return Self::from_f32(hi);
         }
@@ -251,9 +250,6 @@ impl Neg for Df32 {
 
     #[inline]
     fn neg(self) -> Self {
-        if self.is_nan() {
-            return Self::NAN;
-        }
         Self {
             hi: -self.hi,
             lo: if self.lo == 0.0 { 0.0 } else { -self.lo },
@@ -267,13 +263,14 @@ impl Mul for Df32 {
     #[inline]
     fn mul(self, rhs: Self) -> Self {
         let p = self.hi * rhs.hi;
-        if !p.is_finite() || self.is_zero() || rhs.is_zero() {
+        // Preserve infinite products; FMA product-error recovery needs finite p.
+        if !p.is_finite() {
             return Self::from_f32(p);
         }
-        let e = fma(self.hi, rhs.hi, -p);
-        let e = fma(self.hi, rhs.lo, e);
-        let e = fma(self.lo, rhs.hi, e);
-        let e = fma(self.lo, rhs.lo, e);
+        let e = libm::fmaf(self.hi, rhs.hi, -p);
+        let e = libm::fmaf(self.hi, rhs.lo, e);
+        let e = libm::fmaf(self.lo, rhs.hi, e);
+        let e = libm::fmaf(self.lo, rhs.lo, e);
         let result = Self::from_parts(p, e);
         if result.is_zero() {
             Self::from_f32(f32::from_bits(p.to_bits() & (1 << 31)))
@@ -289,7 +286,10 @@ impl Div for Df32 {
     #[inline]
     fn div(self, rhs: Self) -> Self {
         let q0 = self.hi / rhs.hi;
-        if !q0.is_finite() || !rhs.is_finite() || self.is_zero() {
+        // An infinite quotient cannot be refined; division by infinity must
+        // return scalar signed zero rather than evaluate infinity * zero.
+        // Finite zero numerators work through the ordinary correction path.
+        if !q0.is_finite() || !rhs.is_finite() {
             return Self::from_f32(q0);
         }
         // Fixed one-step correction. The separate-operation remainder is
@@ -389,6 +389,27 @@ impl num_traits::MulAddAssign for Df32 {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn nonfinite_or_zero_boundaries() {
+        for magnitude in [
+            0,
+            1,
+            0x007f_ffff,
+            0x0080_0000,
+            0x7f7f_fffe,
+            0x7f7f_ffff,
+            0x7f80_0000,
+            0x7f80_0001,
+            0x7fc0_0000,
+            0x7fff_ffff,
+        ] {
+            for sign in [0, 1 << 31] {
+                let x = f32::from_bits(sign | magnitude);
+                assert_eq!(is_nonfinite_or_zero(x), !x.is_finite() || x == 0.0);
+            }
+        }
+    }
 
     proptest! {
         #[test]

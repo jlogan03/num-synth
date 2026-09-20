@@ -31,7 +31,7 @@ proptest! {
         let x = f32::from_bits(bits);
         let d = Df32::from_f32(x);
         normalized(d);
-        prop_assert_eq!(d.to_f32().to_bits(), if x.is_nan() { 0x7fc00000 } else { bits });
+        prop_assert_eq!(d.to_f32().to_bits(), bits);
     }
 
     #[test]
@@ -109,11 +109,44 @@ proptest! {
     }
 
     #[test]
-    fn full_exponent_outputs_are_canonical(a in any::<u32>(), b in any::<u32>(), c in any::<u32>()) {
+    fn full_exponent_outputs_remain_normalized(a in any::<u32>(), b in any::<u32>(), c in any::<u32>()) {
         let a = Df32::from_f32(f32::from_bits(a));
         let b = Df32::from_f32(f32::from_bits(b));
         let c = Df32::from_f32(f32::from_bits(c));
         for x in [a+b, a-b, a*b, a/b, a.mul_add(b,c)] { normalized(x); }
+    }
+}
+
+#[test]
+fn f64_split_zero_and_nonfinite_boundaries() {
+    const UNDERFLOW: Df32 = Df32::from_f64(-1e-100);
+    assert_eq!(UNDERFLOW.to_parts().0.to_bits(), (-0.0f32).to_bits());
+
+    let halfway = f64::from(f32::from_bits(1)) * 0.5;
+    for magnitude in [
+        0.0,
+        f64::from_bits(1),
+        f64::from_bits(halfway.to_bits() - 1),
+        halfway,
+        f64::from_bits(halfway.to_bits() + 1),
+        f64::from(f32::from_bits(1)),
+        f64::from(f32::MAX),
+        f64::MAX,
+        f64::INFINITY,
+        f64::NAN,
+    ] {
+        for sign in [1.0, -1.0] {
+            let value = sign * magnitude;
+            let result = Df32::from_f64(value);
+            normalized(result);
+            let (hi, lo) = result.to_parts();
+            if value.is_nan() {
+                assert!(hi.is_nan());
+            } else {
+                assert_eq!(hi.to_bits(), (value as f32).to_bits());
+            }
+            assert_eq!(lo.to_bits(), 0);
+        }
     }
 }
 
@@ -246,14 +279,8 @@ fn special_values_and_signed_zeros() {
     }
     assert_eq!((-Df32::ZERO).to_f32().to_bits(), (-0.0f32).to_bits());
     assert_eq!(Df32::from_f64(-0.0).to_f64().to_bits(), (-0.0f64).to_bits());
-    assert_eq!(
-        Df32::from_f32(f32::from_bits(0xff800001))
-            .to_parts()
-            .0
-            .to_bits(),
-        0x7fc00000
-    );
-    assert_eq!((-Df32::NAN).to_parts().0.to_bits(), 0x7fc00000);
+    assert!(Df32::from_f32(f32::from_bits(0xff800001)).is_nan());
+    assert!((-Df32::NAN).is_nan());
     let max = Df32::from_f32(f32::MAX);
     assert!((max * Df32::from_f32(2.0)).is_infinite());
     assert!(max.mul_add(Df32::from_f32(2.0), -max).is_infinite());
@@ -316,5 +343,30 @@ fn fused_and_separate_division_remainders_meet_accuracy_target() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn exceptional_results_survive_error_recovery() {
+    let finite = Df32::from_parts(3.0, 1e-9);
+    let max = Df32::from_f32(f32::MAX);
+    let two = Df32::from_f32(2.0);
+    assert_eq!(Df32::INFINITY + finite, Df32::INFINITY);
+    assert_eq!(Df32::NEG_INFINITY * finite, Df32::NEG_INFINITY);
+    assert_eq!(finite / Df32::INFINITY, Df32::ZERO);
+    assert_eq!(
+        (finite / Df32::NEG_INFINITY).to_f32().to_bits(),
+        (-0.0f32).to_bits()
+    );
+    // Finite operands have a mathematically finite product even if the leading
+    // f32 product overflows: the infinite addend still controls the FMA result.
+    assert_eq!(max.mul_add(two, Df32::NEG_INFINITY), Df32::NEG_INFINITY);
+    assert_eq!((-max).mul_add(two, Df32::INFINITY), Df32::INFINITY);
+    assert!(Df32::INFINITY.mul_add(two, Df32::NEG_INFINITY).is_nan());
+    assert!(Df32::ZERO.mul_add(Df32::INFINITY, finite).is_nan());
+    // Removing the zero-operand shortcuts must retain the whole addend.
+    for zero in [Df32::ZERO, Df32::NEG_ZERO] {
+        assert_eq!(zero.mul_add(finite, finite), finite);
+        assert_eq!(finite.mul_add(zero, finite), finite);
     }
 }

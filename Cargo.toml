@@ -14,3 +14,7 @@ proptest = "1"
 [[bench]]
 name = "arithmetic"
 harness = false
+
+[[bench]]
+name = "conversion"
+harness = false

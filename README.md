@@ -44,6 +44,14 @@ Run `cargo test` for exact-reference properties and directed tests, and
 `cargo bench --bench arithmetic` for side-by-side f32, f64, and Df32 CPU
 measurements of addition, subtraction, multiplication, division, multiply-add,
 and position transforms. Results report median time across seven samples;
-input conversions are outside the timed loops. Embedded and WebAssembly
+input conversions are outside the timed loops.
+
+`cargo bench --bench conversion` measures bulk conversion of 10,000 finite
+f64 values into a preallocated Df32 slice, with f32 conversion and f64 copying
+as baselines. It reports nanoseconds per value, microseconds per batch, and
+millions of values per second. Buffers are reused after warmup; allocation and
+input generation are excluded from timing.
+
+Embedded and WebAssembly
 compilation can be checked with `cargo check --lib --target thumbv7em-none-eabihf`
 and `cargo check --lib --target wasm32-unknown-unknown`.
