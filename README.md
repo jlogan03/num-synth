@@ -41,6 +41,9 @@ devices without f64. GPU primitive integration and execution testing remain
 future work. No GPU throughput claim follows from no-std compatibility.
 
 Run `cargo test` for exact-reference properties and directed tests, and
-`cargo bench --bench arithmetic` for CPU measurements. Embedded and WebAssembly
+`cargo bench --bench arithmetic` for side-by-side f32, f64, and Df32 CPU
+measurements of addition, subtraction, multiplication, division, multiply-add,
+and position transforms. Results report median time across seven samples;
+input conversions are outside the timed loops. Embedded and WebAssembly
 compilation can be checked with `cargo check --lib --target thumbv7em-none-eabihf`
 and `cargo check --lib --target wasm32-unknown-unknown`.
