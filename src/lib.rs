@@ -1,8 +1,13 @@
-//! Synthetic floating-point representations using narrow integer digits.
+//! Fixed-width synthetic floating point using small-width integer arithmetic.
 //!
-//! [`S64I8`] provides exact binary64 expansion and correctly rounded collapse.
-//! Arithmetic is deferred until its rounding contract is established.
+//! [`S64U8`] has 256-bit working precision in 32 unsigned bytes. Arithmetic
+//! stays in this format; explicit conversions round to binary64 or binary32.
+//!
+//! The library uses only `core`: it does not link `std` or `alloc` and requires
+//! no global allocator. All runtime storage is fixed-size. Host-side tests use
+//! separate development dependencies for arbitrary-precision reference checks.
 
-mod s64i8;
+#![no_std]
 
-pub use s64i8::{Class, InvalidFiniteParts, S64I8};
+mod s64u8;
+pub use s64u8::{Class, InvalidFiniteParts, S64U8};
