@@ -18,3 +18,7 @@ harness = false
 [[bench]]
 name = "conversion"
 harness = false
+
+[[bench]]
+name = "bulk_arithmetic"
+harness = false

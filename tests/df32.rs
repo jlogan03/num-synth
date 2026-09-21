@@ -7,7 +7,7 @@ use proptest::prelude::*;
 fn pair() -> impl Strategy<Value = Df32> {
     (
         any::<bool>(),
-        -10i32..=10,
+        -40i32..=40,
         any::<u32>(),
         any::<bool>(),
         0i32..=10,
@@ -98,6 +98,32 @@ proptest! {
     }
 
     #[test]
+    fn multiplication_matches_full_twosum_normalization(bits in prop::array::uniform4(any::<u32>())) {
+        let a = Df32::from_parts(f32::from_bits(bits[0]),f32::from_bits(bits[1]));
+        let b = Df32::from_parts(f32::from_bits(bits[2]),f32::from_bits(bits[3]));
+        let (ah,al)=a.to_parts();
+        let (bh,bl)=b.to_parts();
+        let p = ah*bh;
+        let reference = if !p.is_finite() {
+            Df32::from_f32(p)
+        } else {
+            let e = libm::fmaf(ah,bh,-p);
+            let e = libm::fmaf(ah,bl,e);
+            let e = libm::fmaf(al,bh,e);
+            let e = libm::fmaf(al,bl,e);
+            let result = Df32::from_parts(p,e);
+            if result.is_zero() { Df32::from_f32(f32::from_bits(p.to_bits() & (1<<31))) } else { result }
+        };
+        let got = a*b;
+        if reference.is_nan() {
+            prop_assert!(got.is_nan());
+        } else {
+            prop_assert_eq!(got.to_parts().0.to_bits(),reference.to_parts().0.to_bits());
+            prop_assert_eq!(got.to_parts().1.to_bits(),reference.to_parts().1.to_bits());
+        }
+    }
+
+    #[test]
     fn full_range_pairs_remain_normalized(bits in prop::array::uniform6(any::<u32>())) {
         let a = Df32::from_parts(f32::from_bits(bits[0]), f32::from_bits(bits[1]));
         let b = Df32::from_parts(f32::from_bits(bits[2]), f32::from_bits(bits[3]));
@@ -153,7 +179,8 @@ fn f64_split_zero_and_nonfinite_boundaries() {
 #[test]
 fn representation_and_traits() {
     assert_eq!(core::mem::size_of::<Df32>(), 8);
-    assert_eq!(core::mem::align_of::<Df32>(), core::mem::align_of::<f32>());
+    assert_eq!(core::mem::align_of::<Df32>(), 8);
+    assert_eq!(core::mem::size_of::<[Df32; 3]>(), 24);
     assert_eq!(Df32::default(), Df32::zero());
     assert_eq!(Df32::one(), Df32::ONE);
     let mut x = Df32::from(3.0f32);
@@ -302,7 +329,7 @@ fn residual_carry_can_overflow() {
 #[test]
 fn deterministic_exponent_boundaries() {
     for e in 0u32..255 {
-        for fraction in [0, 1, 0x3fffff, 0x7ffffe, 0x7fffff] {
+        for fraction in [0, 1, 15, 16, 17, 0x3fffff, 0x7ffffe, 0x7fffff] {
             for sign in [0, 1 << 31] {
                 let hi = f32::from_bits(sign | e << 23 | fraction);
                 let x = Df32::from_f32(hi);
@@ -368,5 +395,69 @@ fn exceptional_results_survive_error_recovery() {
     for zero in [Df32::ZERO, Df32::NEG_ZERO] {
         assert_eq!(zero.mul_add(finite, finite), finite);
         assert_eq!(finite.mul_add(zero, finite), finite);
+    }
+}
+
+// The previous conversion sequence is an independent full-TwoSum reference
+// for the optimized split. This targets the rare midpoint cases random f64
+// inputs almost never exercise, especially when residual rounding changes hi.
+#[test]
+fn f64_split_matches_full_twosum_at_midpoints() {
+    for exponent in 0u32..255 {
+        for fraction in [0, 1, 2, 0x3fffff, 0x7ffffd, 0x7ffffe, 0x7fffff] {
+            let bits = (exponent << 23) | fraction;
+            let lower = f32::from_bits(bits) as f64;
+            let upper = if bits == f32::MAX.to_bits() {
+                2f64.powi(128)
+            } else {
+                f32::from_bits(bits + 1) as f64
+            };
+            let midpoint = (lower + upper) * 0.5;
+            for near in [
+                midpoint.to_bits() - 1,
+                midpoint.to_bits(),
+                midpoint.to_bits() + 1,
+            ] {
+                for sign in [0, 1u64 << 63] {
+                    let x = f64::from_bits(near | sign);
+                    let hi = x as f32;
+                    let reference = if !hi.is_finite() || x == 0.0 {
+                        Df32::from_f32(hi)
+                    } else {
+                        Df32::from_parts(hi, (x - hi as f64) as f32)
+                    };
+                    let got = Df32::from_f64(x);
+                    assert_eq!(
+                        got.to_parts().0.to_bits(),
+                        reference.to_parts().0.to_bits(),
+                        "input={x:e}"
+                    );
+                    assert_eq!(
+                        got.to_parts().1.to_bits(),
+                        reference.to_parts().1.to_bits(),
+                        "input={x:e}"
+                    );
+                    normalized(got);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn direct_division_remainder_extreme_scales() {
+    for exponent in [-120, -80, -40, 0, 40, 80, 120] {
+        for sign in [-1.0, 1.0] {
+            let a = Df32::from_parts(sign * 2f32.powi(exponent), sign * 2f32.powi(exponent - 25));
+            for b in [0.7, 1.00000001, 3.25, 9.87654321] {
+                let b = Df32::from_f64(b);
+                let quotient = a / b;
+                normalized(quotient);
+                let error = (value(quotient) * value(b) - (value(a) << 149usize)).abs();
+                // Ordinary relative target plus two output subnormal quanta.
+                let allowance = (value(a).abs() << 104) + (value(b).abs() << 1);
+                assert!(error <= allowance, "a={a:?} b={b:?} q={quotient:?}");
+            }
+        }
     }
 }
