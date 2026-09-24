@@ -19,6 +19,13 @@ division refines its quotient with two scalar FMAs.
 See [the Df32 design](design/Df32.md) for the representation, implemented
 arithmetic, precision limits, and validation plan.
 
+The opt-in `half` feature enables Rust's nightly `f16` language feature:
+`cargo +nightly check --features half`. It exposes `Df16`, a normalized
+`(f16, f16)` format with four-byte size/alignment, scalar conversions,
+arithmetic, comparisons, and combined multiply-add. See
+[the Df16 design](design/Df16.md) for its precision and range limits; it has no Df32 application accuracy target.
+Default builds continue to work on stable Rust.
+
 ```rust
 use num_synth::Df32;
 
@@ -49,16 +56,31 @@ Run `cargo test` for exact-reference properties and directed tests, and
 measurements of addition, subtraction, multiplication, division, multiply-add,
 and position transforms. Results report median time across seven samples;
 input conversions are outside the timed loops.
+The dependency chains use bounded round trips with two operations per
+iteration (two multiply/add pairs for that row); output identifies the counts
+for the four-lane and position workloads. These workloads keep f16 in range.
 
 `cargo bench --bench conversion` measures bulk conversion of 10,000 finite
-f64 values into a preallocated Df32 slice, with f32 conversion and f64 copying
-as baselines. It reports nanoseconds per value, microseconds per batch, and
+f64 values in `[-1e3, +1e3]` into a preallocated Df32 slice, with f32 conversion
+and f64 copying as baselines. It reports nanoseconds per value, microseconds per batch, and
 millions of values per second. Buffers are reused after warmup; allocation and
 input generation are excluded from timing.
 
 `cargo bench --bench bulk_arithmetic` measures independent arithmetic over
 10,000-element slices with preallocated outputs. See the
 [performance comparison](design/performance.md) for measured gains and limits.
+
+Enable f16 and Df16 columns/rows in all three benchmarks with:
+
+```sh
+cargo +nightly bench --features half
+```
+
+All types share the same input distribution. The conversion range fits f16;
+the dependency-chain workloads and conversion range differ from the original
+Df32 benchmarks, so timings are not directly comparable with older runs.
+Half instructions and FMA lowering depend on the compiler and target; Df16
+does not promise a CPU or GPU speedup over f32 or Df32.
 
 Embedded and WebAssembly
 compilation can be checked with `cargo check --lib --target thumbv7em-none-eabihf`

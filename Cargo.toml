@@ -3,6 +3,9 @@ name = "num-synth"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+half = []
+
 [dependencies]
 num-traits = { version = "0.2.19", default-features = false, features = ["libm"] }
 libm = "0.2.16"

@@ -1,3 +1,7 @@
+#![cfg_attr(feature = "half", feature(f16))]
+
+#[cfg(feature = "half")]
+use num_synth::Df16;
 use num_synth::Df32;
 use std::{hint::black_box, time::Instant};
 
@@ -32,26 +36,33 @@ fn measure<T: Copy>(initial: T, mut op: impl FnMut(T) -> T) -> f64 {
 macro_rules! suite {
     ($ty:ty, $convert:expr) => {{
         let from: fn(f64) -> $ty = $convert;
-        let one = from(1.0);
-        // These remain distinct from 1 even after rounding to f32 and keep
-        // repeated multiplication/division finite and normal for the full run.
-        let a = black_box(from(1.00000100000001));
-        let b = black_box(from(0.99999900000001));
-        let c = black_box(from(1e-7));
-        let scale = black_box(from(3.25));
-        let inverse = black_box(from(1.0 / 3.25));
-        let translation = black_box(from(1.23456789));
+        let one = from(1.000123456789);
+        // Exact reciprocal powers of two keep every chain finite and normal
+        // even in f16. Black-box coefficients prevent constant folding.
+        let a = black_box(from(2.0));
+        let b = black_box(from(0.5));
+        let c = black_box(from(0.125));
+        let d = black_box(from(-0.25));
+        let scale = black_box(from(2.0));
+        let inverse = black_box(from(0.5));
+        let translation = black_box(from(1.25));
         [
-            ("add chain", measure(one, |x| x + c)),
-            ("sub chain", measure(one, |x| x - c)),
-            ("mul chain", measure(one, |x| x * a)),
-            ("div chain", measure(one, |x| x / a)),
-            ("mul_add chain", measure(one, |x| x.mul_add(b, c))),
-            ("separate mul/add chain", measure(one, |x| x * b + c)),
+            ("add chain", measure(one, |x| (x + c) + (-c))),
+            ("sub chain", measure(one, |x| (x - c) - (-c))),
+            ("mul chain", measure(one, |x| (x * a) * b)),
+            ("div chain", measure(one, |x| (x / a) / b)),
+            (
+                "mul_add chain",
+                measure(one, |x| x.mul_add(b, c).mul_add(a, d)),
+            ),
+            (
+                "separate mul/add chain",
+                measure(one, |x| (x * b + c) * a + d),
+            ),
             (
                 "independent mul_add x4",
                 measure([one, from(1.25), from(1.5), from(1.75)], |x| {
-                    x.map(|v| v.mul_add(b, c))
+                    x.map(|v| v.mul_add(b, c).mul_add(a, d))
                 }),
             ),
             (
@@ -70,14 +81,30 @@ fn main() {
     let paired = suite!(Df32, Df32::from_f64);
 
     println!("Median of {SAMPLES} samples, {ITERATIONS} iterations each; ns/iteration.");
-    println!("The x4 row measures four values per iteration. Includes loop/black_box overhead.");
+    println!("Each chain iteration has two operations (two mul/add pairs for separate mul/add).");
+    println!("The x4 row has eight FMAs; position round trip has one FMA, subtraction, multiply.");
     println!(
+        "Bounded round trips, including loop/black_box overhead; coefficients are black-boxed."
+    );
+    #[cfg(feature = "half")]
+    let half = suite!(f16, |x| x as f16);
+    #[cfg(feature = "half")]
+    let half_pair = suite!(Df16, Df16::from_f64);
+    print!(
         "{:28} {:>10} {:>10} {:>10}",
         "workload", "f32", "f64", "Df32"
     );
-    for (((name, f32_ns), (_, f64_ns)), (_, df32_ns)) in single.into_iter().zip(double).zip(paired)
-    {
-        println!("{name:28} {f32_ns:10.2} {f64_ns:10.2} {df32_ns:10.2}");
+    #[cfg(feature = "half")]
+    print!(" {:>10} {:>10}", "f16", "Df16");
+    println!();
+    for i in 0..single.len() {
+        print!(
+            "{:28} {:10.2} {:10.2} {:10.2}",
+            single[i].0, single[i].1, double[i].1, paired[i].1
+        );
+        #[cfg(feature = "half")]
+        print!(" {:10.2} {:10.2}", half[i].1, half_pair[i].1);
+        println!();
     }
 
     // Df32-specific algorithm comparison: the provisional quotient and its

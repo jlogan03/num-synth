@@ -1,3 +1,7 @@
+#![cfg_attr(feature = "half", feature(f16))]
+
+#[cfg(feature = "half")]
+use num_synth::Df16;
 use num_synth::Df32;
 use std::{hint::black_box, time::Instant};
 
@@ -67,12 +71,24 @@ fn main() {
     println!(
         "Median ns/value of {SAMPLES} samples, {BATCHES} batches each; includes reads/writes."
     );
-    println!(
+    #[cfg(feature = "half")]
+    let half = suite!(f16, |x| x as f16);
+    #[cfg(feature = "half")]
+    let half_pair = suite!(Df16, Df16::from_f64);
+    print!(
         "{:16} {:>10} {:>10} {:>10}",
         "operation", "f32", "f64", "Df32"
     );
-    for (((name, f32_ns), (_, f64_ns)), (_, df32_ns)) in single.into_iter().zip(double).zip(paired)
-    {
-        println!("{name:16} {f32_ns:10.3} {f64_ns:10.3} {df32_ns:10.3}");
+    #[cfg(feature = "half")]
+    print!(" {:>10} {:>10}", "f16", "Df16");
+    println!();
+    for i in 0..single.len() {
+        print!(
+            "{:16} {:10.3} {:10.3} {:10.3}",
+            single[i].0, single[i].1, double[i].1, paired[i].1
+        );
+        #[cfg(feature = "half")]
+        print!(" {:10.3} {:10.3}", half[i].1, half_pair[i].1);
+        println!();
     }
 }
